@@ -22,6 +22,7 @@ from textual.widgets import (
 
 from config import Config, load_config, save_config
 from saves import (
+    FULL_MOD_SAVE_META,
     BackupEntry,
     SaveSource,
     delete_backup,
@@ -128,6 +129,8 @@ class SettingsScreen(ModalScreen["Config | None"]):
             yield Input(str(self._config.saves_dir), id="saves-dir")
             yield Label("Backup Directory:")
             yield Input(str(self._config.backup_dir), id="backup-dir")
+            yield Label("Mod Install Directory:")
+            yield Input(str(self._config.mods_install_dir), id="mods-install-dir")
             yield Label("", id="error-label")
             with Horizontal():
                 yield Button("Save", id="save", variant="success")
@@ -137,6 +140,7 @@ class SettingsScreen(ModalScreen["Config | None"]):
     def _save(self) -> None:
         saves_input = self.query_one("#saves-dir", Input).value.strip()
         backup_input = self.query_one("#backup-dir", Input).value.strip()
+        mods_input = self.query_one("#mods-install-dir", Input).value.strip()
         error_label = self.query_one("#error-label", Label)
 
         if not saves_input:
@@ -145,15 +149,19 @@ class SettingsScreen(ModalScreen["Config | None"]):
         if not backup_input:
             error_label.update("Backup directory cannot be empty.")
             return
+        if not mods_input:
+            error_label.update("Mod install directory cannot be empty.")
+            return
 
         try:
             saves_dir = Path(saves_input).expanduser().resolve()
             backup_dir = Path(backup_input).expanduser().resolve()
+            mods_install_dir = Path(mods_input).expanduser().resolve()
         except Exception as exc:
             error_label.update(f"Invalid path: {exc}")
             return
 
-        new_config = Config(saves_dir=saves_dir, backup_dir=backup_dir)
+        new_config = Config(saves_dir=saves_dir, backup_dir=backup_dir, mods_install_dir=mods_install_dir)
         self.dismiss(new_config)
 
     @on(Button.Pressed, "#cancel")
@@ -248,7 +256,17 @@ class D2RSaveManager(App):
         if not isinstance(event.item, SourceItem):
             return
         self._current_source = event.item.source
+        self.refresh_bindings()
         self._refresh_backup_table()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "full_mod_save_backup":
+            return (
+                self._current_source is not None
+                and self._current_source.source_type != "vanilla"
+                and self._current_source.mod_name is not None
+            )
+        return True
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is None:
@@ -372,21 +390,19 @@ class D2RSaveManager(App):
             try:
                 do_restore(self.config, source, backup)
                 if backup.is_full_mod_save:
+                    meta_path = backup.path / FULL_MOD_SAVE_META
                     target_mod_dir = "(auto-resolved)"
-                    meta_path = backup.path / ".full_mod_save.json"
                     try:
-                        with meta_path.open("r", encoding="utf-8") as f:
-                            meta = json.load(f)
-                        if isinstance(meta, dict):
-                            restore_targets = meta.get("restore_targets")
-                            if isinstance(restore_targets, dict):
-                                raw_mod_target = restore_targets.get("install_mod_dir")
-                                if isinstance(raw_mod_target, str) and raw_mod_target.strip():
-                                    target_mod_dir = raw_mod_target
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        rt = meta.get("restore_targets") if isinstance(meta, dict) else None
+                        if isinstance(rt, dict):
+                            raw = rt.get("install_mod_dir")
+                            if isinstance(raw, str) and raw.strip():
+                                target_mod_dir = raw
                     except Exception:
                         pass
                     self.set_status(
-                        f"Restored saves to {source.path} and mod to {target_mod_dir}."
+                        f"Restored {source.name} + mod folder to {target_mod_dir}."
                     )
                 else:
                     self.set_status(

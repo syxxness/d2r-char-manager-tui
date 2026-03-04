@@ -16,7 +16,7 @@ Supports full save backups and per-character backups, for both vanilla and mod s
 - **Auto pre-restore snapshots** — before any restore, the current state is automatically backed up and labeled "Pre-Restore" in the UI
 - **Mod support** — any subdirectory under `mods/` is automatically detected as a separate save source
 - **Full mod + save backup (mods only)** — optional hotkey backup that snapshots saves and zips the installed mod folder mapped via each mod's `modinfo.json` save path
-- **Configurable paths** — backup directory and save directory are editable from within the TUI
+- **Configurable paths** — save directory, backup directory, and mod install directory are all editable from within the TUI
 - **Online character filtering** — characters with `.ctlo` files (online-only) are never listed
 
 ---
@@ -45,7 +45,7 @@ python app.py
 | Key | Action |
 |-----|--------|
 | `b` | Backup selected source (full save or character) |
-| `m` | Full mod + save backup (mods only, includes zipped installed mod folder) |
+| `m` | Full mod + save backup — greyed out unless a mod source is selected; includes zipped installed mod folder |
 | `r` | Restore selected backup into the current save directory |
 | `d` | Delete selected backup snapshot |
 | `s` | Open settings (edit save/backup directory paths) |
@@ -98,9 +98,10 @@ Full mod + save snapshots also contain `.full_mod_save` and `.full_mod_save.json
 |------|---------|
 | D2R saves | `~/.steam/steam/steamapps/compatdata/2536520/pfx/drive_c/users/steamuser/Saved Games/Diablo II Resurrected/` |
 | Backups | `~/d2r-backups/` |
+| Mod install dir | `~/.steam/steam/steamapps/common/Diablo II Resurrected/mods/` |
 | Config | `~/.config/d2r-save-manager/config.json` |
 
-Both paths are configurable via `s` → Settings inside the TUI. Config persists across restarts.
+All three paths are configurable via `s` → Settings inside the TUI. Config persists across restarts. If your Steam library is on a non-default drive, update the mod install directory to match.
 
 ---
 

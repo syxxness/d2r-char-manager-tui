@@ -16,9 +16,6 @@ PRE_RESTORE_MARKER = ".pre_restore"
 FULL_MOD_SAVE_MARKER = ".full_mod_save"
 FULL_MOD_SAVE_META = ".full_mod_save.json"
 FULL_MOD_SAVE_ARCHIVE = "mod_files.zip"
-DEFAULT_MODS_DIR = Path(
-    "~/.steam/steam/steamapps/common/Diablo II Resurrected/mods/"
-).expanduser()
 
 # Extensions that make up a single character's save data.
 # .ma* (e.g. .ma0, .ma1) are map cache files — included so maps survive a restore.
@@ -144,6 +141,9 @@ def _read_mod_save_folder(modinfo_path: Path) -> str | None:
                         normalized = _normalize_save_path_name(nested)
                         if normalized:
                             return normalized
+                    # Key matched but value wasn't a usable string — skip recursive
+                    # descent into this value to avoid false positives from nested keys.
+                    continue
                 nested_match = _walk_for_savepath(nested)
                 if nested_match:
                     return nested_match
@@ -170,7 +170,7 @@ def _read_mod_save_folder(modinfo_path: Path) -> str | None:
     return _walk_for_savepath(data)
 
 
-def _resolve_mod_install_dir(save_mod_name: str, mods_root: Path = DEFAULT_MODS_DIR) -> Path | None:
+def _resolve_mod_install_dir(save_mod_name: str, mods_root: Path) -> Path | None:
     if not mods_root.is_dir():
         return None
 
@@ -453,10 +453,10 @@ def do_full_mod_save_backup(config: Config, source: SaveSource) -> BackupEntry:
     if source.mod_name is None or source.source_type == "vanilla":
         raise ValueError("Full mod+save backup only applies to mod saves.")
 
-    install_mod_dir = _resolve_mod_install_dir(source.mod_name)
+    install_mod_dir = _resolve_mod_install_dir(source.mod_name, config.mods_install_dir)
     if install_mod_dir is None:
         raise FileNotFoundError(
-            f"Could not find installed mod folder for save folder '{source.mod_name}' in {DEFAULT_MODS_DIR}."
+            f"Could not find installed mod folder for save folder '{source.mod_name}' in {config.mods_install_dir}."
         )
 
     timestamp = datetime.now()
@@ -479,7 +479,7 @@ def do_full_mod_save_backup(config: Config, source: SaveSource) -> BackupEntry:
                 "restore_targets": {
                     "save_path": str(source.path),
                     "install_mod_dir": str(install_mod_dir),
-                    "mods_root": str(DEFAULT_MODS_DIR),
+                    "mods_root": str(config.mods_install_dir),
                 },
             },
             f,
@@ -545,9 +545,9 @@ def do_restore(config: Config, source: SaveSource, backup: BackupEntry) -> None:
         else:
             install_mod_name = meta.get("install_mod_name")
             if isinstance(install_mod_name, str) and install_mod_name.strip():
-                target_mod_dir = DEFAULT_MODS_DIR / install_mod_name
+                target_mod_dir = config.mods_install_dir / install_mod_name
             else:
-                resolved = _resolve_mod_install_dir(source.mod_name or "")
+                resolved = _resolve_mod_install_dir(source.mod_name or "", config.mods_install_dir)
                 if resolved is None:
                     raise FileNotFoundError(
                         f"Unable to determine mod restore target for '{source.mod_name}'."
