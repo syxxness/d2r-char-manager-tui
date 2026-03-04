@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +13,12 @@ from config import Config
 
 TIMESTAMP_FMT = "%Y%m%d_%H%M%S"
 PRE_RESTORE_MARKER = ".pre_restore"
+FULL_MOD_SAVE_MARKER = ".full_mod_save"
+FULL_MOD_SAVE_META = ".full_mod_save.json"
+FULL_MOD_SAVE_ARCHIVE = "mod_files.zip"
+DEFAULT_MODS_DIR = Path(
+    "~/.steam/steam/steamapps/common/Diablo II Resurrected/mods/"
+).expanduser()
 
 # Extensions that make up a single character's save data.
 # .ma* (e.g. .ma0, .ma1) are map cache files — included so maps survive a restore.
@@ -40,10 +49,11 @@ class BackupEntry:
     path: Path
     size_bytes: int
     is_pre_restore: bool
+    is_full_mod_save: bool
     display_source: str
     display_timestamp: str  # "YYYY-MM-DD HH:MM:SS"
     display_size: str       # "2.3 MB"
-    display_notes: str      # "Pre-Restore" | ""
+    display_notes: str      # "Pre-Restore" | "Full Mod+Save" | "Pre-Restore, Full Mod+Save" | ""
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +88,7 @@ def _make_backup_entry(
     character_name: str | None,
     timestamp: datetime,
     is_pre_restore: bool = False,
+    is_full_mod_save: bool = False,
 ) -> BackupEntry:
     size = _dir_size(path)
 
@@ -92,6 +103,12 @@ def _make_backup_entry(
     else:
         display_source = f"Mod: {mod_name}"
 
+    notes: list[str] = []
+    if is_pre_restore:
+        notes.append("Pre-Restore")
+    if is_full_mod_save:
+        notes.append("Full Mod+Save")
+
     return BackupEntry(
         source_type=source_type,
         mod_name=mod_name,
@@ -100,11 +117,163 @@ def _make_backup_entry(
         path=path,
         size_bytes=size,
         is_pre_restore=is_pre_restore,
+        is_full_mod_save=is_full_mod_save,
         display_source=display_source,
         display_timestamp=timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         display_size=_fmt_size(size),
-        display_notes="Pre-Restore" if is_pre_restore else "",
+        display_notes=", ".join(notes),
     )
+
+
+def _normalize_save_path_name(raw_value: str | None) -> str | None:
+    if not raw_value:
+        return None
+    normalized = raw_value.strip().replace("\\", "/").rstrip("/")
+    if not normalized:
+        return None
+    return Path(normalized).name.lower()
+
+
+def _read_mod_save_folder(modinfo_path: Path) -> str | None:
+    def _walk_for_savepath(value: object) -> str | None:
+        if isinstance(value, dict):
+            for raw_key, nested in value.items():
+                key = str(raw_key).lower().replace("_", "")
+                if key in {"savepath", "savefolder", "savedir", "savefoldername"}:
+                    if isinstance(nested, str):
+                        normalized = _normalize_save_path_name(nested)
+                        if normalized:
+                            return normalized
+                nested_match = _walk_for_savepath(nested)
+                if nested_match:
+                    return nested_match
+        elif isinstance(value, list):
+            for item in value:
+                nested_match = _walk_for_savepath(item)
+                if nested_match:
+                    return nested_match
+        return None
+
+    try:
+        with modinfo_path.open("r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except (OSError, TypeError):
+        return None
+    try:
+        data = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError):
+        # Fallback for malformed JSON-like files.
+        match = re.search(r'"save[_ ]?path"\s*:\s*"([^"]+)"', raw_text, re.IGNORECASE)
+        if match:
+            return _normalize_save_path_name(match.group(1))
+        return None
+    return _walk_for_savepath(data)
+
+
+def _resolve_mod_install_dir(save_mod_name: str, mods_root: Path = DEFAULT_MODS_DIR) -> Path | None:
+    if not mods_root.is_dir():
+        return None
+
+    save_name_norm = _normalize_save_path_name(save_mod_name)
+    if save_name_norm is None:
+        return None
+
+    top_level_mod_dirs = sorted(
+        (p for p in mods_root.iterdir() if p.is_dir()),
+        key=lambda p: p.name.lower(),
+    )
+
+    for mod_dir in top_level_mod_dirs:
+        if mod_dir.name.lower() == save_name_norm:
+            return mod_dir
+
+    # Search recursively for modinfo.json under each top-level mod directory.
+    # If a nested modinfo.json matches the save folder (e.g. Reimagined.mpq/modinfo.json),
+    # use the top-level mod directory as the install folder backup target.
+    for mod_dir in top_level_mod_dirs:
+        for modinfo_path in sorted(mod_dir.rglob("modinfo.json")):
+            mapped_save_folder = _read_mod_save_folder(modinfo_path)
+            if mapped_save_folder == save_name_norm:
+                return mod_dir
+
+    return None
+
+
+def _copy_source_to_backup(source: SaveSource, dest: Path) -> None:
+    if source.source_type == "character":
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in source.path.iterdir():
+            if f.is_file() and _is_character_file(f.name, source.character_name):
+                shutil.copy2(f, dest / f.name)
+    elif source.source_type == "vanilla":
+        shutil.copytree(
+            source.path,
+            dest,
+            ignore=shutil.ignore_patterns("mods"),
+        )
+    else:  # mod
+        shutil.copytree(source.path, dest)
+
+
+def _zip_directory(directory: Path, zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in directory.rglob("*"):
+            if path.is_file():
+                arcname = str(path.relative_to(directory.parent))
+                zf.write(path, arcname=arcname)
+
+
+def _read_full_mod_save_meta(path: Path) -> dict[str, object]:
+    meta_path = path / FULL_MOD_SAVE_META
+    if not meta_path.is_file():
+        return {}
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _restore_mod_archive(
+    backup_path: Path,
+    archive_name: str,
+    target_mod_dir: Path,
+    archived_mod_name: str | None = None,
+) -> None:
+    archive_path = backup_path / archive_name
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"Missing mod archive: {archive_path}")
+
+    with tempfile.TemporaryDirectory(prefix="d2r_mod_restore_") as tmp:
+        temp_root = Path(tmp)
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(temp_root)
+
+        inferred_name = archived_mod_name
+        if not inferred_name:
+            roots = sorted(
+                p.name for p in temp_root.iterdir()
+                if p.is_dir()
+            )
+            if len(roots) == 1:
+                inferred_name = roots[0]
+
+        if not inferred_name:
+            raise ValueError("Unable to determine archived mod folder name.")
+
+        extracted_mod_dir = temp_root / inferred_name
+        if not extracted_mod_dir.is_dir():
+            raise FileNotFoundError(
+                f"Archive did not contain expected mod folder '{inferred_name}'."
+            )
+
+        if target_mod_dir.exists():
+            shutil.rmtree(target_mod_dir)
+        target_mod_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(extracted_mod_dir, target_mod_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +367,20 @@ def get_backups(
             except ValueError:
                 continue
             is_pre_restore = (ts_dir / PRE_RESTORE_MARKER).exists()
+            is_full_mod_save = (
+                (ts_dir / FULL_MOD_SAVE_MARKER).exists()
+                or (ts_dir / FULL_MOD_SAVE_META).exists()
+            )
             entries.append(
-                _make_backup_entry(ts_dir, source_type, mod_name, character_name, ts, is_pre_restore)
+                _make_backup_entry(
+                    ts_dir,
+                    source_type,
+                    mod_name,
+                    character_name,
+                    ts,
+                    is_pre_restore,
+                    is_full_mod_save,
+                )
             )
 
     if source is None:
@@ -251,29 +432,68 @@ def do_backup(
             dest = config.backup_dir / "mods" / source.mod_name / "chars" / source.character_name / ts_str
         else:
             dest = config.backup_dir / "vanilla" / "chars" / source.character_name / ts_str
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in source.path.iterdir():
-            if f.is_file() and _is_character_file(f.name, source.character_name):
-                shutil.copy2(f, dest / f.name)
-
     elif source.source_type == "vanilla":
         dest = config.backup_dir / "vanilla" / ts_str
-        shutil.copytree(
-            source.path,
-            dest,
-            ignore=shutil.ignore_patterns("mods"),
-        )
-
     else:  # mod
         dest = config.backup_dir / "mods" / source.mod_name / ts_str
-        shutil.copytree(source.path, dest)
+
+    _copy_source_to_backup(source, dest)
 
     if is_pre_restore:
         (dest / PRE_RESTORE_MARKER).touch()
 
     return _make_backup_entry(
         dest, source.source_type, source.mod_name, source.character_name,
-        timestamp, is_pre_restore,
+        timestamp, is_pre_restore, is_full_mod_save=False,
+    )
+
+
+def do_full_mod_save_backup(config: Config, source: SaveSource) -> BackupEntry:
+    """Backup save data plus its matching installed mod directory as a zip archive."""
+    if source.mod_name is None or source.source_type == "vanilla":
+        raise ValueError("Full mod+save backup only applies to mod saves.")
+
+    install_mod_dir = _resolve_mod_install_dir(source.mod_name)
+    if install_mod_dir is None:
+        raise FileNotFoundError(
+            f"Could not find installed mod folder for save folder '{source.mod_name}' in {DEFAULT_MODS_DIR}."
+        )
+
+    timestamp = datetime.now()
+    ts_str = timestamp.strftime(TIMESTAMP_FMT)
+
+    if source.source_type == "character":
+        dest = config.backup_dir / "mods" / source.mod_name / "chars" / source.character_name / ts_str
+    else:  # mod
+        dest = config.backup_dir / "mods" / source.mod_name / ts_str
+
+    _copy_source_to_backup(source, dest)
+    _zip_directory(install_mod_dir, dest / FULL_MOD_SAVE_ARCHIVE)
+    (dest / FULL_MOD_SAVE_MARKER).touch()
+    with (dest / FULL_MOD_SAVE_META).open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "install_mod_name": install_mod_dir.name,
+                "save_mod_name": source.mod_name,
+                "archive": FULL_MOD_SAVE_ARCHIVE,
+                "restore_targets": {
+                    "save_path": str(source.path),
+                    "install_mod_dir": str(install_mod_dir),
+                    "mods_root": str(DEFAULT_MODS_DIR),
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    return _make_backup_entry(
+        dest,
+        source.source_type,
+        source.mod_name,
+        source.character_name,
+        timestamp,
+        is_pre_restore=False,
+        is_full_mod_save=True,
     )
 
 
@@ -289,9 +509,9 @@ def do_restore(config: Config, source: SaveSource, backup: BackupEntry) -> None:
         for f in source.path.iterdir():
             if f.is_file() and _is_character_file(f.name, source.character_name):
                 f.unlink()
-        # Copy backed-up character files back (skip the marker file).
+        # Copy back only character files; ignore backup metadata/archives.
         for f in backup.path.iterdir():
-            if f.is_file() and f.name != PRE_RESTORE_MARKER:
+            if f.is_file() and _is_character_file(f.name, source.character_name):
                 shutil.copy2(f, source.path / f.name)
 
     else:
@@ -302,7 +522,50 @@ def do_restore(config: Config, source: SaveSource, backup: BackupEntry) -> None:
             backup.path,
             source.path,
             dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(PRE_RESTORE_MARKER),
+            ignore=shutil.ignore_patterns(
+                PRE_RESTORE_MARKER,
+                FULL_MOD_SAVE_MARKER,
+                FULL_MOD_SAVE_META,
+                FULL_MOD_SAVE_ARCHIVE,
+            ),
+        )
+
+    # For "full mod+save" snapshots, restore the installed mod folder as well.
+    if backup.is_full_mod_save:
+        meta = _read_full_mod_save_meta(backup.path)
+        restore_targets = meta.get("restore_targets")
+        install_target_str = None
+        if isinstance(restore_targets, dict):
+            raw_target = restore_targets.get("install_mod_dir")
+            if isinstance(raw_target, str) and raw_target.strip():
+                install_target_str = raw_target
+
+        if install_target_str:
+            target_mod_dir = Path(install_target_str).expanduser()
+        else:
+            install_mod_name = meta.get("install_mod_name")
+            if isinstance(install_mod_name, str) and install_mod_name.strip():
+                target_mod_dir = DEFAULT_MODS_DIR / install_mod_name
+            else:
+                resolved = _resolve_mod_install_dir(source.mod_name or "")
+                if resolved is None:
+                    raise FileNotFoundError(
+                        f"Unable to determine mod restore target for '{source.mod_name}'."
+                    )
+                target_mod_dir = resolved
+
+        archive_name = meta.get("archive")
+        if not isinstance(archive_name, str) or not archive_name.strip():
+            archive_name = FULL_MOD_SAVE_ARCHIVE
+        archived_mod_name = meta.get("install_mod_name")
+        if not isinstance(archived_mod_name, str) or not archived_mod_name.strip():
+            archived_mod_name = None
+
+        _restore_mod_archive(
+            backup.path,
+            archive_name,
+            target_mod_dir,
+            archived_mod_name=archived_mod_name,
         )
 
 

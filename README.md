@@ -15,6 +15,7 @@ Supports full save backups and per-character backups, for both vanilla and mod s
 - **Per-character backup/restore** — back up a single character's files (`.d2s`, `.ctl`, `.key`, `.ma*`) without touching other characters
 - **Auto pre-restore snapshots** — before any restore, the current state is automatically backed up and labeled "Pre-Restore" in the UI
 - **Mod support** — any subdirectory under `mods/` is automatically detected as a separate save source
+- **Full mod + save backup (mods only)** — optional hotkey backup that snapshots saves and zips the installed mod folder mapped via each mod's `modinfo.json` save path
 - **Configurable paths** — backup directory and save directory are editable from within the TUI
 - **Online character filtering** — characters with `.ctlo` files (online-only) are never listed
 
@@ -44,6 +45,7 @@ python app.py
 | Key | Action |
 |-----|--------|
 | `b` | Backup selected source (full save or character) |
+| `m` | Full mod + save backup (mods only, includes zipped installed mod folder) |
 | `r` | Restore selected backup into the current save directory |
 | `d` | Delete selected backup snapshot |
 | `s` | Open settings (edit save/backup directory paths) |
@@ -86,6 +88,7 @@ Characters are listed indented under their parent save source. Selecting a chara
 ```
 
 Pre-restore snapshots contain a `.pre_restore` marker file inside the snapshot directory. This file is never copied back into your save directory during a restore.
+Full mod + save snapshots also contain `.full_mod_save` and `.full_mod_save.json` markers plus `mod_files.zip`.
 
 ---
 

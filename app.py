@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from textual import on
@@ -25,6 +26,7 @@ from saves import (
     SaveSource,
     delete_backup,
     do_backup,
+    do_full_mod_save_backup,
     do_restore,
     get_backups,
     get_save_sources,
@@ -179,6 +181,7 @@ class D2RSaveManager(App):
 
     BINDINGS = [
         Binding("b", "backup", "Backup"),
+        Binding("m", "full_mod_save_backup", "Full Mod+Save Backup"),
         Binding("r", "restore", "Restore"),
         Binding("d", "delete", "Delete"),
         Binding("s", "settings", "Settings"),
@@ -320,6 +323,33 @@ class D2RSaveManager(App):
             _do_backup,
         )
 
+    def action_full_mod_save_backup(self) -> None:
+        if self._current_source is None:
+            self.set_status("No save source selected.")
+            return
+        source = self._current_source
+        if source.mod_name is None or source.source_type == "vanilla":
+            self.set_status("Full mod+save backup only applies to mod save sources.")
+            return
+
+        def _do_backup(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            try:
+                entry = do_full_mod_save_backup(self.config, source)
+                self.set_status(
+                    f"Backed up {source.name} + mod folder → {entry.display_timestamp} ({entry.display_size})"
+                )
+            except Exception as exc:
+                self.set_status(f"Full mod+save backup failed: {exc}")
+            finally:
+                self._refresh_backup_table()
+
+        self.push_screen(
+            ConfirmScreen(f"Back up {source.name} + installed mod folder?"),
+            _do_backup,
+        )
+
     def action_restore(self) -> None:
         if self._current_source is None:
             self.set_status("No save source selected.")
@@ -341,9 +371,27 @@ class D2RSaveManager(App):
                 return
             try:
                 do_restore(self.config, source, backup)
-                self.set_status(
-                    f"Restored {source.name} from {backup.display_timestamp}."
-                )
+                if backup.is_full_mod_save:
+                    target_mod_dir = "(auto-resolved)"
+                    meta_path = backup.path / ".full_mod_save.json"
+                    try:
+                        with meta_path.open("r", encoding="utf-8") as f:
+                            meta = json.load(f)
+                        if isinstance(meta, dict):
+                            restore_targets = meta.get("restore_targets")
+                            if isinstance(restore_targets, dict):
+                                raw_mod_target = restore_targets.get("install_mod_dir")
+                                if isinstance(raw_mod_target, str) and raw_mod_target.strip():
+                                    target_mod_dir = raw_mod_target
+                    except Exception:
+                        pass
+                    self.set_status(
+                        f"Restored saves to {source.path} and mod to {target_mod_dir}."
+                    )
+                else:
+                    self.set_status(
+                        f"Restored {source.name} from {backup.display_timestamp}."
+                    )
             except Exception as exc:
                 self.set_status(f"Restore failed: {exc}")
             finally:
