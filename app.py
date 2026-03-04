@@ -85,6 +85,65 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class CommentScreen(ModalScreen["str | None"]):
+    """Optional comment entry before a backup. Returns the comment string or None to cancel."""
+
+    DEFAULT_CSS = """
+    CommentScreen {
+        align: center middle;
+        background: $background 60%;
+    }
+    CommentScreen > Vertical {
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+        width: 64;
+        height: auto;
+    }
+    CommentScreen Label {
+        margin-bottom: 1;
+    }
+    CommentScreen Input {
+        margin-bottom: 1;
+    }
+    CommentScreen Horizontal {
+        height: auto;
+        align: center middle;
+    }
+    CommentScreen Button {
+        margin: 0 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Add a comment (optional):")
+            yield Input(placeholder="e.g. before trying new runeword", id="comment-input")
+            with Horizontal():
+                yield Button("OK", id="ok", variant="success")
+                yield Button("Skip", id="skip", variant="default")
+                yield Button("Cancel", id="cancel", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#comment-input", Input).focus()
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self.dismiss(self.query_one("#comment-input", Input).value)
+
+    @on(Input.Submitted)
+    def _submitted(self) -> None:
+        self.dismiss(self.query_one("#comment-input", Input).value)
+
+    @on(Button.Pressed, "#skip")
+    def _skip(self) -> None:
+        self.dismiss("")
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SettingsScreen(ModalScreen["Config | None"]):
     """Edit backup_dir and saves_dir paths."""
 
@@ -323,23 +382,26 @@ class D2RSaveManager(App):
             return
         source = self._current_source
 
-        def _do_backup(confirmed: bool) -> None:
-            if not confirmed:
-                return
-            try:
-                entry = do_backup(self.config, source)
-                self.set_status(
-                    f"Backed up {source.name} → {entry.display_timestamp} ({entry.display_size})"
-                )
-            except Exception as exc:
-                self.set_status(f"Backup failed: {exc}")
-            finally:
-                self._refresh_backup_table()
+        def _after_comment(comment: "str | None") -> None:
+            if comment is None:
+                return  # user cancelled
 
-        self.push_screen(
-            ConfirmScreen(f"Back up {source.name}?"),
-            _do_backup,
-        )
+            def _do_backup(confirmed: bool) -> None:
+                if not confirmed:
+                    return
+                try:
+                    entry = do_backup(self.config, source, comment=comment)
+                    self.set_status(
+                        f"Backed up {source.name} → {entry.display_timestamp} ({entry.display_size})"
+                    )
+                except Exception as exc:
+                    self.set_status(f"Backup failed: {exc}")
+                finally:
+                    self._refresh_backup_table()
+
+            self.push_screen(ConfirmScreen(f"Back up {source.name}?"), _do_backup)
+
+        self.push_screen(CommentScreen(), _after_comment)
 
     def action_full_mod_save_backup(self) -> None:
         if self._current_source is None:
@@ -350,23 +412,29 @@ class D2RSaveManager(App):
             self.set_status("Full mod+save backup only applies to mod save sources.")
             return
 
-        def _do_backup(confirmed: bool) -> None:
-            if not confirmed:
-                return
-            try:
-                entry = do_full_mod_save_backup(self.config, source)
-                self.set_status(
-                    f"Backed up {source.name} + mod folder → {entry.display_timestamp} ({entry.display_size})"
-                )
-            except Exception as exc:
-                self.set_status(f"Full mod+save backup failed: {exc}")
-            finally:
-                self._refresh_backup_table()
+        def _after_comment(comment: "str | None") -> None:
+            if comment is None:
+                return  # user cancelled
 
-        self.push_screen(
-            ConfirmScreen(f"Back up {source.name} + installed mod folder?"),
-            _do_backup,
-        )
+            def _do_backup(confirmed: bool) -> None:
+                if not confirmed:
+                    return
+                try:
+                    entry = do_full_mod_save_backup(self.config, source, comment=comment)
+                    self.set_status(
+                        f"Backed up {source.name} + mod folder → {entry.display_timestamp} ({entry.display_size})"
+                    )
+                except Exception as exc:
+                    self.set_status(f"Full mod+save backup failed: {exc}")
+                finally:
+                    self._refresh_backup_table()
+
+            self.push_screen(
+                ConfirmScreen(f"Back up {source.name} + installed mod folder?"),
+                _do_backup,
+            )
+
+        self.push_screen(CommentScreen(), _after_comment)
 
     def action_restore(self) -> None:
         if self._current_source is None:

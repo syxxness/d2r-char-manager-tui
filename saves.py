@@ -16,6 +16,7 @@ PRE_RESTORE_MARKER = ".pre_restore"
 FULL_MOD_SAVE_MARKER = ".full_mod_save"
 FULL_MOD_SAVE_META = ".full_mod_save.json"
 FULL_MOD_SAVE_ARCHIVE = "mod_files.zip"
+COMMENT_FILE = ".comment"
 
 # Extensions that make up a single character's save data.
 # .ma* (e.g. .ma0, .ma1) are map cache files — included so maps survive a restore.
@@ -47,10 +48,11 @@ class BackupEntry:
     size_bytes: int
     is_pre_restore: bool
     is_full_mod_save: bool
+    comment: str
     display_source: str
     display_timestamp: str  # "YYYY-MM-DD HH:MM:SS"
     display_size: str       # "2.3 MB"
-    display_notes: str      # "Pre-Restore" | "Full Mod+Save" | "Pre-Restore, Full Mod+Save" | ""
+    display_notes: str      # flags + comment, e.g. "Pre-Restore — my note"
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +102,25 @@ def _make_backup_entry(
     else:
         display_source = f"Mod: {mod_name}"
 
-    notes: list[str] = []
+    comment_path = path / COMMENT_FILE
+    try:
+        comment = comment_path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        comment = ""
+
+    flags: list[str] = []
     if is_pre_restore:
-        notes.append("Pre-Restore")
+        flags.append("Pre-Restore")
     if is_full_mod_save:
-        notes.append("Full Mod+Save")
+        flags.append("Full Mod+Save")
+
+    flag_str = ", ".join(flags)
+    if flag_str and comment:
+        display_notes = f"{flag_str} — {comment}"
+    elif flag_str:
+        display_notes = flag_str
+    else:
+        display_notes = comment
 
     return BackupEntry(
         source_type=source_type,
@@ -115,10 +131,11 @@ def _make_backup_entry(
         size_bytes=size,
         is_pre_restore=is_pre_restore,
         is_full_mod_save=is_full_mod_save,
+        comment=comment,
         display_source=display_source,
         display_timestamp=timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         display_size=_fmt_size(size),
-        display_notes=", ".join(notes),
+        display_notes=display_notes,
     )
 
 
@@ -421,7 +438,10 @@ def get_backups(
 
 
 def do_backup(
-    config: Config, source: SaveSource, is_pre_restore: bool = False
+    config: Config,
+    source: SaveSource,
+    is_pre_restore: bool = False,
+    comment: str = "",
 ) -> BackupEntry:
     """Copy current save files into a new timestamped backup directory."""
     timestamp = datetime.now()
@@ -442,13 +462,16 @@ def do_backup(
     if is_pre_restore:
         (dest / PRE_RESTORE_MARKER).touch()
 
+    if comment:
+        (dest / COMMENT_FILE).write_text(comment.strip(), encoding="utf-8")
+
     return _make_backup_entry(
         dest, source.source_type, source.mod_name, source.character_name,
         timestamp, is_pre_restore, is_full_mod_save=False,
     )
 
 
-def do_full_mod_save_backup(config: Config, source: SaveSource) -> BackupEntry:
+def do_full_mod_save_backup(config: Config, source: SaveSource, comment: str = "") -> BackupEntry:
     """Backup save data plus its matching installed mod directory as a zip archive."""
     if source.mod_name is None or source.source_type == "vanilla":
         raise ValueError("Full mod+save backup only applies to mod saves.")
@@ -470,6 +493,8 @@ def do_full_mod_save_backup(config: Config, source: SaveSource) -> BackupEntry:
     _copy_source_to_backup(source, dest)
     _zip_directory(install_mod_dir, dest / FULL_MOD_SAVE_ARCHIVE)
     (dest / FULL_MOD_SAVE_MARKER).touch()
+    if comment:
+        (dest / COMMENT_FILE).write_text(comment.strip(), encoding="utf-8")
     with (dest / FULL_MOD_SAVE_META).open("w", encoding="utf-8") as f:
         json.dump(
             {
@@ -527,6 +552,7 @@ def do_restore(config: Config, source: SaveSource, backup: BackupEntry) -> None:
                 FULL_MOD_SAVE_MARKER,
                 FULL_MOD_SAVE_META,
                 FULL_MOD_SAVE_ARCHIVE,
+                COMMENT_FILE,
             ),
         )
 
