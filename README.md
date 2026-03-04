@@ -2,6 +2,9 @@
 
 A terminal UI for backing up and restoring **Diablo II Resurrected** offline save files on Linux (Steam).
 
+"I" created this with two purposes. First, was to simply test Claude Code. BUT! I also wanted a quick backup/restore utility for my D2 saves when working on mods.
+Oh, and I also like TUI's.  Feel free to use, contribute, or completely ignore this marginally useful tool!
+
 Supports full save backups and per-character backups, for both vanilla and mod saves. Restores automatically snapshot the current state first so you can always roll back.
 
 ---
